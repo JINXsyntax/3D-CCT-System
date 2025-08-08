@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Model Viewer — Camera Walk Tour</title>
+
+  <!-- model-viewer -->
+  <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+
+  <style>
+    :root{
+      --accent: #1976d2;
+      --bg: #f6f8fa;
+    }
+    html,body{height:100%;margin:0;background:var(--bg);font-family:system-ui,-apple-system,Segoe UI,Roboto;}
+    .wrap{height:100vh;display:flex;flex-direction:column;}
+    model-viewer{
+      flex:1;
+      width:100%;
+      background-color:#e9eef5;
+      --poster-color: #ddd;
+    }
+
+    .ui {
+      position: absolute;
+      left: 16px;
+      top: 16px;
+      display:flex;
+      gap:8px;
+      z-index: 20;
+    }
+
+    button {
+      background: white;
+      border: 1px solid rgba(0,0,0,0.08);
+      padding: 8px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight:600;
+      color:#111;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+    }
+    button.primary { background: var(--accent); color: white; border: none; }
+    button.danger { background: #ff5252; color: white; border: none; }
+
+    .controls {
+      position: absolute;
+      right: 16px;
+      top: 16px;
+      display:flex;
+      gap:8px;
+      align-items:center;
+      z-index:20;
+    }
+
+    .progress-wrap {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height:6px;
+      background: rgba(0,0,0,0.06);
+      z-index: 20;
+    }
+    .progress {
+      height:100%;
+      width:0%;
+      background: var(--accent);
+      transition: width 0.08s linear;
+    }
+
+    .small {
+      font-size: 13px;
+      opacity: 0.9;
+    }
+
+    .label {
+      background: rgba(255,255,255,0.9);
+      padding:6px 8px;
+      border-radius:6px;
+      border:1px solid rgba(0,0,0,0.06);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- model-viewer: palitan ang src kung iba ang filename -->
+    <model-viewer id="mv"
+      src="CCT Building.glb"
+      alt="3D model"
+      camera-controls
+      interaction-prompt="none"
+      shadow-intensity="1"
+      shadow-softness="0.8"
+      exposure="1"
+      environment-image="neutral"
+      poster="poster.webp"
+      min-camera-orbit="auto 0deg auto"    
+      max-camera-orbit="auto 90deg auto"   
+      min-field-of-view="15deg"
+      max-field-of-view="70deg"
+      style="width:100%;height:100%;">
+    </model-viewer>
+
+    <div class="ui">
+      <div class="label small" id="status">Model: loading…</div>
+    </div>
+
+    <div class="controls">
+      <button id="startBtn" class="primary">Start Tour</button>
+      <button id="pauseBtn">Pause</button>
+      <button id="stopBtn" class="danger">Stop</button>
+      <div class="label small" id="timeLabel">0 / 0s</div>
+    </div>
+
+    <div class="progress-wrap"><div class="progress" id="prog"></div></div>
+  </div>
+
+<script>
+  const mv = document.getElementById('mv');
+  const startBtn = document.getElementById('startBtn');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const status = document.getElementById('status');
+  const prog = document.getElementById('prog');
+  const timeLabel = document.getElementById('timeLabel');
+
+  // --- TOUR CONFIG: points are camera-orbit tuples: [azimuth, elevation, radius]
+  // azimuth/elevation can be in deg (strings with "deg") or numbers (radians).
+  // We'll use degrees in strings for clarity.
+  // Adjust these to match your house layout (angles & distances).
+  const tourPoints = [
+    {az: "0deg",   el: "20deg", r: "4m"},
+    {az: "45deg",  el: "15deg", r: "3.5m"},
+    {az: "90deg",  el: "10deg", r: "3m"},
+    {az: "140deg", el: "12deg", r: "3.2m"},
+    {az: "180deg", el: "18deg", r: "4.5m"}
+  ];
+
+  const totalDuration = 20_000; // total tour time in ms (adjust)
+  let playing = false;
+  let paused = false;
+  let startTime = 0;
+  let pauseTime = 0;
+
+  // Precompute segment durations proportional to angular distance
+  function computeSegments(points, totalMs) {
+    const segs = [];
+    let totalWeight = 0;
+    for (let i = 0; i < points.length - 1; i++) {
+      const a = parseDeg(points[i].az);
+      const b = parseDeg(points[i+1].az);
+      const da = Math.abs(shortestAngleDiff(a, b));
+      const dr = Math.abs(parseMeters(points[i].r) - parseMeters(points[i+1].r));
+      // weight: angular distance + small weight for radius change
+      const weight = da + dr * 5;
+      segs.push({from: points[i], to: points[i+1], weight});
+      totalWeight += weight;
+    }
+    // assign ms
+    segs.forEach(s => s.duration = Math.max(200, Math.round(totalMs * (s.weight / totalWeight))));
+    return segs;
+  }
+
+  function parseDeg(val) {
+    if (typeof val === 'string' && val.endsWith('deg')) return parseFloat(val);
+    return Number(val);
+  }
+  function parseMeters(val){
+    if (typeof val === 'string' && val.endsWith('m')) return parseFloat(val);
+    return Number(val);
+  } 
+
+  // shortest angle difference in degrees (-180..180)
+  function shortestAngleDiff(a,b){
+    let diff = ((b - a + 180) % 360) - 180;
+    if (diff < -180) diff += 360;
+    return diff;
+  }
+
+  const segments = computeSegments(tourPoints, totalDuration);
+  const tourLength = segments.reduce((s, seg) => s + seg.duration, 0);
+
+  // Helpers for setting camera orbit
+  function setCameraOrbit(azDeg, elDeg, radiusStr){
+    // model-viewer expects camera-orbit as "azimuth elevation radius"
+    mv.cameraOrbit = `${azDeg} ${elDeg} ${radiusStr}`;
+    // ensure the controls update
+    mv.jumpCameraToGoal(); // immediate apply (supported by model-viewer)
+  }
+
+  // Interpolate between two values (degrees or meters)
+  function lerp(a,b,t){ return a + (b - a) * t; }
+
+  // Animate using requestAnimationFrame
+  let rafId = null;
+  function animateTour(now){
+    if (!playing) { cancelAnimationFrame(rafId); return; }
+    if (!startTime) startTime = now;
+
+    // handle pause
+    if (paused) { pauseTime = now; startTime += (now - pauseTime); rafId = requestAnimationFrame(animateTour); return; }
+
+    const elapsed = now - startTime;
+    const clamped = Math.min(elapsed, tourLength);
+    updateProgress(clamped / tourLength, Math.round(clamped / 1000), Math.round(tourLength / 1000));
+
+    // find current segment
+    let cursor = 0;
+    for (let i = 0; i < segments.length; i++){
+      const seg = segments[i];
+      if (clamped <= cursor + seg.duration || i === segments.length -1){
+        const localT = Math.max(0, Math.min(1, (clamped - cursor) / seg.duration));
+        // from and to
+        const from = seg.from;
+        const to = seg.to;
+        // compute shortest azimuth interpolation
+        const aFrom = parseDeg(from.az);
+        const aTo = aFrom + shortestAngleDiff(aFrom, parseDeg(to.az));
+        const azNow = lerp(aFrom, aTo, easeInOut(localT));
+        const elNow = lerp(parseDeg(from.el), parseDeg(to.el), easeInOut(localT));
+        const rNow  = lerp(parseMeters(from.r), parseMeters(to.r), easeInOut(localT));
+        setCameraOrbit(`${azNow}deg`, `${elNow}deg`, `${rNow}m`);
+        break;
+      }
+      cursor += seg.duration;
+    }
+
+    if (clamped >= tourLength) {
+      // finish
+      playing = false;
+      startBtn.textContent = 'Start Tour';
+    } else {
+      rafId = requestAnimationFrame(animateTour);
+    }
+  }
+
+  function updateProgress(fraction, secElapsed, secTotal){
+    prog.style.width = `${Math.round(fraction * 100)}%`;
+    timeLabel.textContent = `${secElapsed} / ${secTotal}s`;
+  }
+
+  function easeInOut(t){
+    return t < 0.5 ? 2*t*t : -1 + (4 - 2*t)*t;
+  }
+
+  // Controls
+  startBtn.addEventListener('click', () => {
+    if (!playing) {
+      // start fresh
+      playing = true;
+      paused = false;
+      startTime = 0;
+      rafId = requestAnimationFrame(animateTour);
+      startBtn.textContent = 'Playing…';
+    } else {
+      // if already playing, restart
+      startTime = 0;
+      paused = false;
+      startBtn.textContent = 'Playing…';
+    }
+  });
+
+  pauseBtn.addEventListener('click', () => {
+    if (!playing) return;
+    paused = !paused;
+    pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+  });
+
+  stopBtn.addEventListener('click', () => {
+    playing = false;
+    paused = false;
+    startBtn.textContent = 'Start Tour';
+    pauseBtn.textContent = 'Pause';
+    prog.style.width = '0%';
+    timeLabel.textContent = `0 / ${Math.round(tourLength/1000)}s`;
+    // reset to first point
+    const p = tourPoints[0];
+    setCameraOrbit(p.az, p.el, p.r);
+  });
+
+  // model-viewer events
+  mv.addEventListener('load', () => {
+    status.textContent = 'Model: loaded';
+    // set initial camera to first point
+    const p = tourPoints[0];
+    setCameraOrbit(p.az, p.el, p.r);
+    // show 0/total seconds
+    timeLabel.textContent = `0 / ${Math.round(tourLength/1000)}s`;
+  });
+
+  mv.addEventListener('progress', (ev) => {
+    // ev.detail.totalProgress is 0..1
+    const pct = Math.round(ev.detail.totalProgress * 100);
+    status.textContent = `Model: loading ${pct}%`;
+  });
+
+  mv.addEventListener('error', (e) => {
+    status.textContent = 'Model: error loading';
+    console.error('model-viewer error', e);
+  });
+
+  // Prevent camera from going below min elevation even if user drags camera
+  // (model-viewer respects min-camera-orbit, but this enforces it while we animate)
+  mv.addEventListener('camera-change', () => {
+    // ensure elevation >= 0deg
+    const orbit = mv.getCameraOrbit(); // returns {theta, phi, radius} in radians/meters
+    // phi is polar angle from +Y axis in radians; convert to degrees of elevation = 90deg - polar?
+    // Simpler: rely on attribute min-camera-orbit already set; we still reapply if needed
+    // No-op here — model-viewer enforces min/max camera orbit automatically.
+  });
+
+  // Utility: jumpCameraToGoal fallback for older versions
+  if (typeof mv.jumpCameraToGoal !== 'function') {
+    mv.jumpCameraToGoal = () => {}; // noop if not available
+  }
+
+  // initialize status if model already cached
+  if (mv.currentTime) {
+    status.textContent = 'Model: ready';
+    const p = tourPoints[0];
+    setCameraOrbit(p.az, p.el, p.r);
+  }
+</script>
+</body>
+</html>
